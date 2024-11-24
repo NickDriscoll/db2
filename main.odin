@@ -2,17 +2,25 @@ package main
 
 import "core:c"
 import "core:log"
+import "core:math/linalg/hlsl"
+import "core:slice"
+import "core:strings"
 
 import "vendor:sdl2"
 import vk "vendor:vulkan"
+import stbi "vendor:stb/image"
 
 import vkw "desktop_vulkan_wrapper"
+import hm "desktop_vulkan_wrapper/handlemap"
 import imgui "odin-imgui"
 
 FRAMES_IN_FLIGHT :: 2
+NULL_OFFSET :: 0xFFFFFFFF
 
 main :: proc() {
-    context.logger = log.create_console_logger(.Debug)
+    //context.logger = log.create_console_logger(.Debug)
+    context.logger = log.create_console_logger(.Info)
+    //context.logger = log.create_console_logger(.Warning)
     log.info("Initializing")
 
     sdl2.Init({.EVENTS, .VIDEO})
@@ -36,11 +44,11 @@ main :: proc() {
     vgd := vkw.init_vulkan(&init_params)    
     
     // Make window
-    resolution: vkw.int2
+    resolution: hlsl.uint2
     resolution.x = 1920
     resolution.y = 1080
     sdl_windowflags : sdl2.WindowFlags = {.VULKAN,.RESIZABLE}
-    sdl_window := sdl2.CreateWindow("db2", sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED, resolution.x, resolution.y, sdl_windowflags)
+    sdl_window := sdl2.CreateWindow("db2", sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED, i32(resolution.x), i32(resolution.y), sdl_windowflags)
     defer sdl2.DestroyWindow(sdl_window)
 
     // Initialize the state required for rendering to the window
@@ -55,7 +63,8 @@ main :: proc() {
     {
         info := vkw.Semaphore_Info {
             type = .TIMELINE,
-            init_value = 0
+            init_value = 0,
+            name = "GFX Timeline"
         }
         gfx_timeline = vkw.create_semaphore(&vgd, &info)
     }
@@ -64,12 +73,17 @@ main :: proc() {
     imgui_state := imgui_init(&vgd, resolution)
     defer imgui_cleanup(&vgd, &imgui_state)
 
+    loaded_images := make([dynamic]vkw.Image_Handle, len = 0, cap = 64, allocator = context.allocator)
+    defer delete(loaded_images)
+
     gfx_sync_info: vkw.Sync_Info
 
     running := true
     for running {
         //Event handling
         did_resize := false
+        files_to_load := make([dynamic]string, allocator = context.temp_allocator)
+        defer delete(files_to_load)
         {
             io := imgui.GetIO()
             event: sdl2.Event
@@ -80,11 +94,15 @@ main :: proc() {
                         #partial switch (event.window.event) {
                             case .RESIZED: {
                                 did_resize = true
-                                resolution = vkw.int2{event.window.data1, event.window.data2}
+                                resolution = hlsl.uint2{u32(event.window.data1), u32(event.window.data2)}
                                 log.debugf("resized to %v", resolution)
 
                             }
                         }
+                    }
+                    case .DROPFILE: {
+                        log.infof("Opening image: \"%v\"", event.drop.file)
+                        append(&files_to_load, string(event.drop.file))
                     }
                     case .KEYDOWN: {
                         imgui.IO_AddKeyEvent(io, SDL2ToImGuiKey(event.key.keysym.sym), true)
@@ -101,6 +119,9 @@ main :: proc() {
                     case .MOUSEBUTTONUP: {
                         imgui.IO_AddMouseButtonEvent(io, SDL2ToImGuiMouseButton(event.button.button), false)
                     }
+                    case .MOUSEWHEEL: {
+                        imgui.IO_AddMouseWheelEvent(io, f32(event.wheel.x), f32(event.wheel.y))
+                    }
                 }
             }
         }
@@ -108,9 +129,60 @@ main :: proc() {
 
         // Update
 
+        // Load requested images
+        // for filepath in files_to_load {
+        //     filename := strings.unsafe_string_to_cstring(filepath)
+        //     width, height, channels: i32
+        //     image_bytes := stbi.load(filename, &width, &height, &channels, 4)
+        //     defer stbi.image_free(image_bytes)
+        //     byte_count := int(width * height * 4)
+        //     image_slice := slice.from_ptr(image_bytes, byte_count)
+        //     log.debugf("%v uncompressed size: %v bytes", filename, byte_count)
+    
+        //     info := vkw.Image_Create {
+        //         flags = nil,
+        //         image_type = .D2,
+        //         format = .R8G8B8A8_SRGB,
+        //         extent = {
+        //             width = u32(width),
+        //             height = u32(height),
+        //             depth = 1
+        //         },
+        //         supports_mipmaps = false,
+        //         array_layers = 1,
+        //         samples = {._1},
+        //         tiling = .OPTIMAL,
+        //         usage = {.SAMPLED,.TRANSFER_DST},
+        //         alloc_flags = nil
+        //     }
+        //     handle, ok := vkw.sync_create_image_with_data(&vgd, &info, image_slice)
+        //     if !ok {
+        //         log.error("vkw.sync_create_image_with_data failed.")
+        //     }
+
+        //     append(&loaded_images, handle)
+        // }
+
+        for filepath in files_to_load {
+            filename := strings.unsafe_string_to_cstring(filepath)
+            x, y, comp: c.int
+            stbi.info(filename, &x, &y, &comp)
+            log.infof("%v dimensions: (%v, %v)", x, y)
+        }
+
+        // Display loaded images
+        for image_handle in loaded_images {
+            image, ok := vkw.get_image(&vgd, image_handle)
+            if !ok {
+                log.warn("Couldn't fetch image from handle: %v", image_handle)
+                continue
+            }
+
+            imgui.Image(hm.handle_to_rawptr(image_handle), {f32(image.extent.width), f32(image.extent.height)})
+        }
+
         // Handle window resize
         if did_resize {
-            //imgui.SetWindowSize(imgui.Vec2{f32(resolution.x), f32(resolution.y)})
             io := imgui.GetIO()
             io.DisplaySize = imgui.Vec2{f32(resolution.x), f32(resolution.y)}
             success := vkw.resize_window(&vgd, resolution)
@@ -119,6 +191,16 @@ main :: proc() {
 
 
         imgui.ShowDemoWindow()
+
+        main_window_flags := imgui.WindowFlags {
+
+        }
+        if imgui.Begin("Main window", flags = main_window_flags) {
+            
+        }
+        imgui.End()
+
+        //imgui.Image()
 
         // Render
         {
@@ -132,10 +214,6 @@ main :: proc() {
             if vgd.frame_count >= u64(vgd.frames_in_flight) {
                 // Wait on timeline semaphore before starting command buffer execution
                 wait_value := vgd.frame_count - u64(vgd.frames_in_flight) + 1
-                append(&gfx_sync_info.wait_ops, vkw.Semaphore_Op {
-                    semaphore = gfx_timeline,
-                    value = wait_value
-                })
 
                 // CPU-sync to prevent CPU from getting further ahead than
                 // the number of frames in flight
@@ -147,17 +225,15 @@ main :: proc() {
                     flags = nil,
                     semaphoreCount = 1,
                     pSemaphores = sem,
-                    pValues = &wait_value
+                    pValues = &wait_value,
                 }
                 if vk.WaitSemaphores(vgd.device, &info, max(u64)) != .SUCCESS {
                     log.error("Failed to wait for timeline semaphore CPU-side man what")
                 }
             }
             
-            gfx_cb_idx := vkw.begin_gfx_command_buffer(&vgd)
-
-            // This has to be called once per frame
-            vkw.begin_frame(&vgd, gfx_cb_idx)
+            // Begin command buffer recording
+            gfx_cb_idx := vkw.begin_gfx_command_buffer(&vgd, &gfx_sync_info, gfx_timeline)
     
             swapchain_image_idx: u32
             vkw.acquire_swapchain_image(&vgd, &swapchain_image_idx)
@@ -201,6 +277,7 @@ main :: proc() {
             framebuffer.resolution.y = u32(resolution.y)
             framebuffer.clear_color = {0.0, 0.5, 0.5, 1.0}
             framebuffer.color_load_op = .CLEAR
+            framebuffer.depth_image = { index = NULL_OFFSET }
             vkw.cmd_begin_render_pass(&vgd, gfx_cb_idx, &framebuffer)
 
             // Set viewport
@@ -216,7 +293,7 @@ main :: proc() {
             })
 
             // Draw Dear ImGUI
-            draw_imgui(&vgd, gfx_cb_idx, &imgui_state)
+            render_imgui(&vgd, gfx_cb_idx, &imgui_state)
 
             vkw.cmd_end_render_pass(&vgd, gfx_cb_idx)
     

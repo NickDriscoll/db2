@@ -8,13 +8,14 @@ import "vendor:sdl2"
 import vk "vendor:vulkan"
 import imgui "odin-imgui"
 import vkw "desktop_vulkan_wrapper"
+import hm "desktop_vulkan_wrapper/handlemap"
 
 MAX_IMGUI_VERTICES :: 64 * 1024 * 1024
 MAX_IMGUI_INDICES :: 16 * 1024 * 1024
 
 ImguiPushConstants :: struct {
     font_idx: u32,
-    sampler: vkw.Immutable_Samplers,
+    sampler: vkw.Immutable_Sampler_Index,
     vertex_offset: u32,
     uniform_data: vk.DeviceAddress,
     vertex_data: vk.DeviceAddress
@@ -30,11 +31,13 @@ ImguiState :: struct {
     vertex_buffer: vkw.Buffer_Handle,
     index_buffer: vkw.Buffer_Handle,
     uniform_buffer: vkw.Buffer_Handle,
-    pipeline: vkw.Pipeline_Handle
+    pipeline: vkw.Pipeline_Handle,
+    show_gui: bool
 }
 
-imgui_init :: proc(gd: ^vkw.Graphics_Device, resolution: vkw.int2) -> ImguiState {
+imgui_init :: proc(gd: ^vkw.Graphics_Device, resolution: hlsl.uint2) -> ImguiState {
     imgui_state: ImguiState
+    imgui_state.show_gui = true
     imgui_state.ctxt = imgui.CreateContext()
     
     io := imgui.GetIO()
@@ -61,7 +64,8 @@ imgui_init :: proc(gd: ^vkw.Graphics_Device, resolution: vkw.int2) -> ImguiState
         samples = {._1},
         tiling = .OPTIMAL,
         usage = {.SAMPLED,.TRANSFER_DST},
-        alloc_flags = nil
+        alloc_flags = nil,
+        name = "Dear ImGUI font atlas"
     }
     font_bytes_slice := slice.from_ptr(font_data, int(width * height * 4))
     ok: bool
@@ -72,6 +76,8 @@ imgui_init :: proc(gd: ^vkw.Graphics_Device, resolution: vkw.int2) -> ImguiState
 
     // Free CPU-side texture data
     imgui.FontAtlas_ClearTexData(io.Fonts)
+
+    imgui.FontAtlas_SetTexID(io.Fonts, hm.handle_to_rawptr(imgui_state.font_atlas))
 
     // Allocate imgui vertex buffer
     buffer_info := vkw.Buffer_Info {
@@ -90,6 +96,17 @@ imgui_init :: proc(gd: ^vkw.Graphics_Device, resolution: vkw.int2) -> ImguiState
         required_flags = {.DEVICE_LOCAL}
     }
     imgui_state.index_buffer = vkw.create_buffer(gd, &buffer_info)
+
+    // Create uniform buffer
+    {
+        info := vkw.Buffer_Info {
+            size = size_of(ImguiUniforms),
+            usage = {.UNIFORM_BUFFER,.TRANSFER_DST},
+            alloc_flags = nil,
+            required_flags = {.DEVICE_LOCAL,.HOST_VISIBLE,.HOST_COHERENT}
+        }
+        imgui_state.uniform_buffer = vkw.create_buffer(gd, &info)
+    }
 
     // Create pipeline for drawing
 
@@ -142,27 +159,12 @@ imgui_init :: proc(gd: ^vkw.Graphics_Device, resolution: vkw.int2) -> ImguiState
 
     imgui_state.pipeline = handles[0]
 
-    // Create uniform buffer
-    {
-        info := vkw.Buffer_Info {
-            size = size_of(ImguiUniforms),
-            usage = {.UNIFORM_BUFFER,.TRANSFER_DST},
-            alloc_flags = nil,
-            required_flags = {.DEVICE_LOCAL,.HOST_VISIBLE,.HOST_COHERENT}
-        }
-        imgui_state.uniform_buffer = vkw.create_buffer(gd, &info)
-    }
-
     return imgui_state
-}
-
-resize_imgui :: proc(using state: ^ImguiState) {
-    
 }
 
 // Once-per-frame call to update imgui vtx/idx/uniform buffers
 // and record imgui draw commands into current frame's command buffer
-draw_imgui :: proc(
+render_imgui :: proc(
     gd: ^vkw.Graphics_Device,
     gfx_cb_idx: vkw.CommandBuffer_Index,
     imgui_state: ^ImguiState
@@ -246,8 +248,9 @@ draw_imgui :: proc(
                 }
             })
 
+            tex_handle := hm.rawptr_to_handle(cmd.TextureId)
             vkw.cmd_push_constants_gfx(ImguiPushConstants, gd, gfx_cb_idx, &ImguiPushConstants {
-                font_idx = imgui_state.font_atlas.index,
+                font_idx = tex_handle.index,
                 sampler = .Point,
                 vertex_offset = cmd.VtxOffset + global_vtx_offset + local_vtx_offset,
                 uniform_data = uniform_buf.address,
