@@ -3,6 +3,7 @@ package main
 import "core:c"
 import "core:log"
 import "core:math/linalg/hlsl"
+import "core:os"
 import "core:slice"
 import "core:strings"
 
@@ -17,10 +18,30 @@ import imgui "odin-imgui"
 FRAMES_IN_FLIGHT :: 2
 NULL_OFFSET :: 0xFFFFFFFF
 
-main :: proc() {
-    //context.logger = log.create_console_logger(.Debug)
-    context.logger = log.create_console_logger(.Info)
-    //context.logger = log.create_console_logger(.Warning)
+main :: proc() {// Parse command-line arguments
+    log_level := log.Level.Info
+    {
+        argc := len(os.args)
+        for arg, i in os.args {
+            if arg == "--log-level" || arg == "-l" {
+                if i + 1 < argc {
+                    switch os.args[i + 1] {
+                        case "DEBUG": log_level = .Debug
+                        case "INFO": log_level = .Info
+                        case "WARNING": log_level = .Warning
+                        case "ERROR": log_level = .Error
+                        case "FATAL": log_level = .Fatal
+                        case: log.warnf(
+                            "Unrecognized --log-level: %v. Using default (%v)",
+                            os.args[i + 1],
+                            log_level
+                        )
+                    }
+                }
+            }
+        }
+    }
+    context.logger = log.create_console_logger(log_level)
     log.info("Initializing")
 
     sdl2.Init({.EVENTS, .VIDEO})
@@ -72,7 +93,9 @@ main :: proc() {
     //Dear ImGUI init
     imgui_state := imgui_init(&vgd, resolution)
     defer imgui_cleanup(&vgd, &imgui_state)
-
+    
+    files_to_load := make([dynamic]string, allocator = context.allocator)
+    defer delete(files_to_load)
     loaded_images := make([dynamic]vkw.Image_Handle, len = 0, cap = 64, allocator = context.allocator)
     defer delete(loaded_images)
 
@@ -82,8 +105,6 @@ main :: proc() {
     for running {
         //Event handling
         did_resize := false
-        files_to_load := make([dynamic]string, allocator = context.temp_allocator)
-        defer delete(files_to_load)
         {
             io := imgui.GetIO()
             event: sdl2.Event
@@ -105,6 +126,7 @@ main :: proc() {
                         append(&files_to_load, string(event.drop.file))
                     }
                     case .KEYDOWN: {
+                        log.debugf("%v", event.key)
                         imgui.IO_AddKeyEvent(io, SDL2ToImGuiKey(event.key.keysym.sym), true)
                     }
                     case .KEYUP: {
@@ -130,56 +152,50 @@ main :: proc() {
         // Update
 
         // Load requested images
-        // for filepath in files_to_load {
-        //     filename := strings.unsafe_string_to_cstring(filepath)
-        //     width, height, channels: i32
-        //     image_bytes := stbi.load(filename, &width, &height, &channels, 4)
-        //     defer stbi.image_free(image_bytes)
-        //     byte_count := int(width * height * 4)
-        //     image_slice := slice.from_ptr(image_bytes, byte_count)
-        //     log.debugf("%v uncompressed size: %v bytes", filename, byte_count)
-    
-        //     info := vkw.Image_Create {
-        //         flags = nil,
-        //         image_type = .D2,
-        //         format = .R8G8B8A8_SRGB,
-        //         extent = {
-        //             width = u32(width),
-        //             height = u32(height),
-        //             depth = 1
-        //         },
-        //         supports_mipmaps = false,
-        //         array_layers = 1,
-        //         samples = {._1},
-        //         tiling = .OPTIMAL,
-        //         usage = {.SAMPLED,.TRANSFER_DST},
-        //         alloc_flags = nil
-        //     }
-        //     handle, ok := vkw.sync_create_image_with_data(&vgd, &info, image_slice)
-        //     if !ok {
-        //         log.error("vkw.sync_create_image_with_data failed.")
-        //     }
-
-        //     append(&loaded_images, handle)
-        // }
-
-        for filepath in files_to_load {
+        for len(files_to_load) > 0 {
+            filepath := pop(&files_to_load)
             filename := strings.unsafe_string_to_cstring(filepath)
-            x, y, comp: c.int
-            stbi.info(filename, &x, &y, &comp)
-            log.infof("%v dimensions: (%v, %v)", x, y)
-        }
-
-        // Display loaded images
-        for image_handle in loaded_images {
-            image, ok := vkw.get_image(&vgd, image_handle)
+            width, height, channels: i32
+            image_bytes := stbi.load(filename, &width, &height, &channels, 4)
+            defer stbi.image_free(image_bytes)
+            byte_count := int(width * height * 4)
+            image_slice := slice.from_ptr(image_bytes, byte_count)
+            log.debugf("%v uncompressed size: %v bytes", filename, byte_count)
+    
+            info := vkw.Image_Create {
+                flags = nil,
+                image_type = .D2,
+                format = .R8G8B8A8_SRGB,
+                extent = {
+                    width = u32(width),
+                    height = u32(height),
+                    depth = 1
+                },
+                supports_mipmaps = false,
+                array_layers = 1,
+                samples = {._1},
+                tiling = .OPTIMAL,
+                usage = {.SAMPLED,.TRANSFER_DST},
+                alloc_flags = nil
+            }
+            handle, ok := vkw.sync_create_image_with_data(&vgd, &info, image_slice)
             if !ok {
-                log.warn("Couldn't fetch image from handle: %v", image_handle)
+                log.error("vkw.sync_create_image_with_data failed.")
                 continue
             }
 
-            imgui.Image(hm.handle_to_rawptr(image_handle), {f32(image.extent.width), f32(image.extent.height)})
+            append(&loaded_images, handle)
+            break
         }
+
+        // pixels_sum: u64
+        // for filepath in files_to_load {
+        //     filename := strings.unsafe_string_to_cstring(filepath)
+        //     x, y, comp: c.int
+        //     stbi.info(filename, &x, &y, &comp)
+        //     pixels_sum += u64(x + y)
+        // }
+        // if pixels_sum > 0 do log.infof("Total pixels: %v", pixels_sum)
 
         // Handle window resize
         if did_resize {
@@ -189,13 +205,38 @@ main :: proc() {
             if !success do log.error("Failed to resize window")
         }
 
-
-        imgui.ShowDemoWindow()
-
         main_window_flags := imgui.WindowFlags {
-
+            .NoTitleBar,
+            .NoMove,
+            .NoBackground,
+            .NoResize
         }
         if imgui.Begin("Main window", flags = main_window_flags) {
+            imgui.SetWindowPos({0, 0})
+            imgui.SetWindowSize({f32(resolution.x), f32(resolution.y)})
+
+            if imgui.Button("Clear") {
+                for handle in loaded_images {
+                    vkw.delete_image(&vgd, handle)
+                }
+                clear(&loaded_images)
+            }
+            imgui.Separator()
+
+            // Display loaded images
+            for image_handle, i in loaded_images {
+                image, ok := vkw.get_image(&vgd, image_handle)
+                if !ok {
+                    log.warn("Couldn't fetch image from handle: %v", image_handle)
+                    continue
+                }
+                if !(i % 3 == 0) do imgui.SameLine()
+
+                display_width := f32(resolution.x) / 4
+                display_height := display_width * f32(image.extent.height) / f32(image.extent.width)
+    
+                imgui.Image(hm.handle_to_rawptr(image_handle), {display_width, display_height})
+            }
             
         }
         imgui.End()
@@ -275,7 +316,6 @@ main :: proc() {
             framebuffer.color_images[0] = swapchain_image_handle
             framebuffer.resolution.x = u32(resolution.x)
             framebuffer.resolution.y = u32(resolution.y)
-            framebuffer.clear_color = {0.0, 0.5, 0.5, 1.0}
             framebuffer.color_load_op = .CLEAR
             framebuffer.depth_image = { index = NULL_OFFSET }
             vkw.cmd_begin_render_pass(&vgd, gfx_cb_idx, &framebuffer)
