@@ -251,7 +251,7 @@ render_imgui :: proc(
             tex_handle := hm.rawptr_to_handle(cmd.TextureId)
             vkw.cmd_push_constants_gfx(ImguiPushConstants, gd, gfx_cb_idx, &ImguiPushConstants {
                 font_idx = tex_handle.index,
-                sampler = .Point,
+                sampler = .Aniso16,
                 vertex_offset = cmd.VtxOffset + global_vtx_offset + local_vtx_offset,
                 uniform_data = uniform_buf.address,
                 vertex_data = imgui_vertex_buffer.address
