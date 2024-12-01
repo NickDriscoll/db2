@@ -18,6 +18,12 @@ import imgui "odin-imgui"
 FRAMES_IN_FLIGHT :: 2
 NULL_OFFSET :: 0xFFFFFFFF
 
+load_gif :: proc(path: string) {
+    cpath := strings.unsafe_string_to_cstring(path)
+
+
+}
+
 main :: proc() {// Parse command-line arguments
     log_level := log.Level.Info
     {
@@ -71,6 +77,7 @@ main :: proc() {// Parse command-line arguments
     sdl_windowflags : sdl2.WindowFlags = {.VULKAN,.RESIZABLE}
     sdl_window := sdl2.CreateWindow("db2", sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED, i32(resolution.x), i32(resolution.y), sdl_windowflags)
     defer sdl2.DestroyWindow(sdl_window)
+    //sdl2.SetWindowOpacity(sdl_window, 0.9)
 
     // Initialize the state required for rendering to the window
     {
@@ -109,6 +116,7 @@ main :: proc() {// Parse command-line arguments
             io := imgui.GetIO()
             event: sdl2.Event
             for sdl2.PollEvent(&event) {
+            //for sdl2.WaitEvent(&event) {
                 #partial switch (event.type) {
                     case .QUIT: running = false
                     case .WINDOWEVENT: {
@@ -154,35 +162,57 @@ main :: proc() {// Parse command-line arguments
         // Load requested images
         for len(files_to_load) > 0 {
             filepath := pop(&files_to_load)
-            filename := strings.unsafe_string_to_cstring(filepath)
-            width, height, channels: i32
-            image_bytes := stbi.load(filename, &width, &height, &channels, 4)
-            defer stbi.image_free(image_bytes)
-            byte_count := int(width * height * 4)
-            image_slice := slice.from_ptr(image_bytes, byte_count)
-            log.debugf("%v uncompressed size: %v bytes", filename, byte_count)
+
+            handle: vkw.Image_Handle
+            if filepath[len(filepath)-3:] == "gif" {
+                file_bytes, ok := os.read_entire_file(filepath)
+                if !ok {
+                    log.error("Failed to read entire file.")
+                }
+
+                delays: [^]c.int
+                x, y: c.int
+                frame_count: c.int
+                comp: c.int
+                req_comp : c.int = 4
+                gif_bytes := stbi.load_gif_from_memory(&file_bytes[0], i32(len(file_bytes)), &delays, &x, &y, &frame_count, &comp, req_comp)
+
+                
+
+            } else {
+                filename := strings.unsafe_string_to_cstring(filepath)
+                width, height, channels: i32
+                image_bytes := stbi.load(filename, &width, &height, &channels, 4)
+                defer stbi.image_free(image_bytes)
     
-            info := vkw.Image_Create {
-                flags = nil,
-                image_type = .D2,
-                format = .R8G8B8A8_SRGB,
-                extent = {
-                    width = u32(width),
-                    height = u32(height),
-                    depth = 1
-                },
-                supports_mipmaps = false,
-                array_layers = 1,
-                samples = {._1},
-                tiling = .OPTIMAL,
-                usage = {.SAMPLED,.TRANSFER_DST},
-                alloc_flags = nil
+                byte_count := int(width * height * 4)
+                image_slice := slice.from_ptr(image_bytes, byte_count)
+                log.debugf("%v uncompressed size: %v bytes", filename, byte_count)
+        
+                info := vkw.Image_Create {
+                    flags = nil,
+                    image_type = .D2,
+                    format = .R8G8B8A8_SRGB,
+                    extent = {
+                        width = u32(width),
+                        height = u32(height),
+                        depth = 1
+                    },
+                    supports_mipmaps = false,
+                    array_layers = 1,
+                    samples = {._1},
+                    tiling = .OPTIMAL,
+                    usage = {.SAMPLED,.TRANSFER_DST},
+                    alloc_flags = nil
+                }
+                ok: bool
+                handle, ok = vkw.sync_create_image_with_data(&vgd, &info, image_slice)
+                if !ok {
+                    log.error("vkw.sync_create_image_with_data failed.")
+                    continue
+                }
             }
-            handle, ok := vkw.sync_create_image_with_data(&vgd, &info, image_slice)
-            if !ok {
-                log.error("vkw.sync_create_image_with_data failed.")
-                continue
-            }
+
 
             append(&loaded_images, handle)
             break
@@ -208,7 +238,7 @@ main :: proc() {// Parse command-line arguments
         main_window_flags := imgui.WindowFlags {
             .NoTitleBar,
             .NoMove,
-            .NoBackground,
+            //.NoBackground,
             .NoResize
         }
         if imgui.Begin("Main window", flags = main_window_flags) {
@@ -223,25 +253,29 @@ main :: proc() {// Parse command-line arguments
             }
             imgui.Separator()
 
-            // Display loaded images
-            for image_handle, i in loaded_images {
-                image, ok := vkw.get_image(&vgd, image_handle)
-                if !ok {
-                    log.warn("Couldn't fetch image from handle: %v", image_handle)
-                    continue
-                }
-                if !(i % 3 == 0) do imgui.SameLine()
-
-                display_width := f32(resolution.x) / 4
-                display_height := display_width * f32(image.extent.height) / f32(image.extent.width)
+            // Start child window which will hold the images
+            if imgui.BeginChild("Images") {
+                // Display loaded images
+                for image_handle, i in loaded_images {
+                    image, ok := vkw.get_image(&vgd, image_handle)
+                    if !ok {
+                        log.warn("Couldn't fetch image from handle: %v", image_handle)
+                        continue
+                    }
     
-                imgui.Image(hm.handle_to_rawptr(image_handle), {display_width, display_height})
+                    images_per_row := 3
+                    if !(i % images_per_row == 0) do imgui.SameLine()
+    
+                    display_width := f32(resolution.x) / f32(images_per_row)
+                    display_height := display_width * f32(image.extent.height) / f32(image.extent.width)
+        
+                    imgui.Image(hm.handle_to_rawptr(image_handle), {display_width, display_height})
+                }
+
+                imgui.EndChild()
             }
-            
         }
         imgui.End()
-
-        //imgui.Image()
 
         // Render
         {
